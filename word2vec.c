@@ -24,7 +24,7 @@
 #define MAX_SENTENCE_LENGTH 1000
 #define MAX_CODE_LENGTH 40
 
-#define PPDB_TABLE_SIZE 10
+#define PPDB_TABLE_SIZE 20
 
 const int vocab_hash_size = 30000000;  // Maximum 30 * 0.7 = 21M words in the vocabulary
 
@@ -361,8 +361,8 @@ void InitParaphraseScoreTable() {
 
 // Read paraphrases from file. Yuanzhi Ke. 2016 Modified to count the size Mar, 2017
 void ReadParaphrase() {
-  long long a, i = 0;
-  char c;
+  long long i = 0;
+  int a = 0;
   char ppword[MAX_STRING];
   char baseword[MAX_STRING];
 
@@ -372,24 +372,29 @@ void ReadParaphrase() {
     exit(1);
   }
   InitParaphraseTable();
+  InitParaphraseScoreTable();
   while (1) {
     ReadWord(ppword, fin);
     if (feof(fin)) break;
-    if ((!strcmp(ppword, (char *)"</s>")) && (i>0)){
+    a = strcmp(ppword, (char *)"</s>");
+//    printf("i: %d ppword:%s strcmp: %d", i, ppword, a);
+    if (!a){
       i = 0;
-    }
-    if ((strcmp(ppword, (char *)"</s>")) && (i=0)){
+    } else if ((a !=0 ) && (i==0)){
       strcpy(baseword, ppword);
       i++;
-    }
-    if ((strcmp(ppword, (char *)"</s>")) && (i>0)){
-      if (i%2==0)
-        paraphrase_scores[(SearchVocab(baseword)) * PPDB_TABLE_SIZE * + i - 2] = atof(ppword);
-      else if (SearchVocab(baseword) > 0 && SearchVocab(ppword) > 0 && (!(i > PPDB_TABLE_SIZE)))
-        paraphrases[(SearchVocab(baseword)) * PPDB_TABLE_SIZE * + i - 1] = SearchVocab(ppword);
+    } else if ((a !=0 ) && (i>0)){
+      if (i%2==0){
+        paraphrase_scores[(SearchVocab(baseword)) * PPDB_TABLE_SIZE + (i/2) -1] = atof(ppword);
+      }
+      else if (SearchVocab(baseword) > 0 && SearchVocab(ppword) > 0 && (!(i > PPDB_TABLE_SIZE))){
+        paraphrases[(SearchVocab(baseword)) * PPDB_TABLE_SIZE + ((i+1)/2) - 1] = SearchVocab(ppword);
+//        printf("[(SearchVocab(baseword)) * PPDB_TABLE_SIZE + ((i+1)/2) - 1]: %d SearchVocab(ppword): %d SearchVocab(ppword): %d\n", (SearchVocab(baseword)) * PPDB_TABLE_SIZE + ((i+1)/2) - 1, SearchVocab(baseword), SearchVocab(ppword));
+      }
       i++;
     }
   }
+  fclose(fin);
 }
 
 void InitNet() {
@@ -609,8 +614,10 @@ void *TrainRCMThread(void *id) {
   real *neu1 = (real *)calloc(layer1_size, sizeof(real));
   real *neu1e = (real *)calloc(layer1_size, sizeof(real));
   long long ppdb_start_position = vocab_size / (long long)num_threads * (long long)id;
+//  long long ppdb_start_position = 0;
   while (1)
   {
+//    printf("%d\n", word_count);
     if (word_count - last_word_count > 10000) {
       word_count_actual += word_count - last_word_count;
       last_word_count = word_count;
@@ -626,6 +633,7 @@ void *TrainRCMThread(void *id) {
     }
     if (ppdb_start_position + word_count == 0) word_count++;
     if (word_count + ppdb_start_position > vocab_size || (word_count > vocab_size / num_threads)) {
+//    if (word_count + ppdb_start_position > vocab_size || (word_count > vocab_size)) {
       word_count_actual += word_count - last_word_count;
       local_iter--;
       if (local_iter == 0) break;
@@ -638,10 +646,9 @@ void *TrainRCMThread(void *id) {
     if (word == -1) continue;
     for (c = 0; c < layer1_size; c++) neu1[c] = 0;
     for (c = 0; c < layer1_size; c++) neu1e[c] = 0;
-//    next_random = next_random * (unsigned long long)25214903917 + 11;
-//    b = next_random % window;
     //train the cbow architecture
     // in -> hidden
+//    printf("in -> hidden\n");
     cw = 0;
     // read paraphrases as the context instead
     for (a = 0; a < PPDB_TABLE_SIZE; a++) if (paraphrases[word * PPDB_TABLE_SIZE + a - 1] > 0) {
@@ -649,6 +656,11 @@ void *TrainRCMThread(void *id) {
       if (last_word == -1) continue;
       for (c = 0; c < layer1_size; c++) neu1[c] += syn0[c + last_word * layer1_size];
       cw++;
+    }
+    if (cw > 0){
+//      printf("cw: %d\n", cw);
+    } else {
+//      printf("warning: no cw\n");
     }
     if (cw) {
       for (c = 0; c < layer1_size; c++) neu1[c] /= cw;
@@ -689,19 +701,12 @@ void *TrainRCMThread(void *id) {
         for (c = 0; c < layer1_size; c++) syn1neg[c + l2] += g * neu1[c];
       }
       // hidden -> in
-      for (a = b; a < window * 2 + 1 - b; a++) if (a != window) {
-        c = sentence_position - window + a;
-        if (c < 0) continue;
-        if (c >= sentence_length) continue;
-        last_word = sen[c];
+//      printf("hidden -> in\n");
+      for (a = 0; a < PPDB_TABLE_SIZE; a++) if (paraphrases[word * PPDB_TABLE_SIZE + a - 1] > 0) {
+        last_word = paraphrases[word * PPDB_TABLE_SIZE + a - 1];
         if (last_word == -1) continue;
         for (c = 0; c < layer1_size; c++) syn0[c + last_word * layer1_size] += neu1e[c];
       }
-    }
-    sentence_position++;
-    if (sentence_position >= sentence_length) {
-      sentence_length = 0;
-      continue;
     }
     word_count++;
   }
@@ -725,6 +730,12 @@ void TrainModel() {
   ReadParaphrase();
   InitNet();
 
+  for (a=0; a < sizeof(paraphrases); a++){
+    if (paraphrases[a] > 0){
+      printf("ok word: %d - %d", a, paraphrases[a]);
+    }
+  }
+
   // W2V part
   if (negative > 0) InitUnigramTable();
   start = clock();
@@ -736,6 +747,8 @@ void TrainModel() {
   start = clock;
   for (a = 0; a < num_threads; a++) pthread_create(&pt[a], NULL, TrainRCMThread, (void *)a);
   for (a = 0; a < num_threads; a++) pthread_join(pt[a], NULL);
+
+//  TrainRCMThread(0);
 
   fo = fopen(output_file, "wb");
   fot = fopen(strcat(output_file, ".txt"), "wb");
